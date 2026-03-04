@@ -20,23 +20,10 @@
       position: relative;
     }
 
-    body::before {
-      content: '';
-      position: fixed;
-      top: 0;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      background: url('compression-logo.jpg') center center no-repeat;
-      background-size: 60%;
-      opacity: 0.15;
-      pointer-events: none;
-      z-index: 0;
-    }
 
     .container {
-      position: relative;
-      z-index: 1;
+      max-width: 800px;
+      margin: 0 auto;
     }
 
     h1 {
@@ -49,31 +36,37 @@
       border: 3px dashed #4a4a6a;
       border-radius: 12px;
       padding: 40px 20px;
-      min-height: 250px;
+      min-height: 300px;
       display: flex;
       flex-direction: column;
-      justify-content: center;
+      justify-content: flex-end;
       align-items: center;
       text-align: center;
       transition: all 0.3s ease;
-      background: #252542;
+      background: url('compression-logo.jpg') center center no-repeat;
+      background-size: contain;
+      background-color: #252542;
       cursor: pointer;
+      position: relative;
     }
 
     .drop-zone.dragover {
       border-color: #6c63ff;
-      background: #2d2d52;
       transform: scale(1.02);
+      filter: brightness(1.2);
     }
 
     .drop-zone-text {
       font-size: 18px;
-      color: #888;
+      color: #fff;
+      background: rgba(0, 0, 0, 0.6);
+      padding: 10px 20px;
+      border-radius: 8px;
+      margin-top: 20px;
     }
 
     .drop-zone-icon {
-      font-size: 48px;
-      margin-bottom: 15px;
+      display: none;
     }
 
     .file-list {
