@@ -35,8 +35,8 @@
     .drop-zone {
       border: 3px dashed #4a4a6a;
       border-radius: 12px;
-      padding: 40px 20px;
-      min-height: 300px;
+      aspect-ratio: 1024 / 559;
+      max-width: 100%;
       display: flex;
       flex-direction: column;
       justify-content: flex-end;
@@ -44,10 +44,8 @@
       text-align: center;
       transition: all 0.3s ease;
       background: url('compression-logo.jpg') center center no-repeat;
-      background-size: contain;
-      background-color: #252542;
+      background-size: cover;
       cursor: pointer;
-      position: relative;
     }
 
     .drop-zone.dragover {
