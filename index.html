@@ -29,7 +29,7 @@
       bottom: 0;
       background: url('compression-logo.jpg') center center no-repeat;
       background-size: 60%;
-      opacity: 0.06;
+      opacity: 0.15;
       pointer-events: none;
       z-index: 0;
     }
@@ -405,6 +405,282 @@
     })();
 
     // ============================================
+    // LZMA Compression Implementation (Pure JS)
+    // ============================================
+
+    const LZMA = (() => {
+      const LZMA_LC = 3;  // Literal context bits
+      const LZMA_LP = 0;  // Literal pos bits
+      const LZMA_PB = 2;  // Pos bits
+      const LZMA_DICT_SIZE = 1 << 20;  // 1MB dictionary
+
+      class RangeEncoder {
+        constructor() {
+          this.low = 0n;
+          this.range = 0xFFFFFFFFn;
+          this.cacheSize = 1;
+          this.cache = 0;
+          this.buffer = [];
+        }
+
+        shiftLow() {
+          const lowHi = Number(this.low >> 32n);
+          if (lowHi !== 0 || this.low < 0xFF000000n) {
+            let temp = this.cache;
+            do {
+              this.buffer.push((temp + lowHi) & 0xFF);
+              temp = 0xFF;
+            } while (--this.cacheSize > 0);
+            this.cache = Number((this.low >> 24n) & 0xFFn);
+          }
+          this.cacheSize++;
+          this.low = (this.low << 8n) & 0xFFFFFFFFn;
+        }
+
+        encode(prob, symbol) {
+          const bound = (this.range >> 11n) * BigInt(prob[0]);
+          if (symbol === 0) {
+            this.range = bound;
+            prob[0] += (2048 - prob[0]) >> 5;
+          } else {
+            this.low += bound;
+            this.range -= bound;
+            prob[0] -= prob[0] >> 5;
+          }
+          while (this.range < 0x1000000n) {
+            this.range <<= 8n;
+            this.shiftLow();
+          }
+        }
+
+        encodeDirect(numBits, value) {
+          for (let i = numBits - 1; i >= 0; i--) {
+            this.range >>= 1n;
+            if (((value >> i) & 1) === 1) {
+              this.low += this.range;
+            }
+            while (this.range < 0x1000000n) {
+              this.range <<= 8n;
+              this.shiftLow();
+            }
+          }
+        }
+
+        finish() {
+          for (let i = 0; i < 5; i++) {
+            this.shiftLow();
+          }
+          return new Uint8Array(this.buffer);
+        }
+      }
+
+      function initProbs(count) {
+        const probs = [];
+        for (let i = 0; i < count; i++) {
+          probs.push([1024]); // Initial probability 0.5
+        }
+        return probs;
+      }
+
+      function compress(data) {
+        const encoder = new RangeEncoder();
+
+        // Probability models
+        const isMatch = initProbs(192);
+        const isRep = initProbs(12);
+        const isRepG0 = initProbs(12);
+        const isRepG1 = initProbs(12);
+        const isRepG2 = initProbs(12);
+        const isRep0Long = initProbs(192);
+        const literal = initProbs(768 << (LZMA_LC + LZMA_LP));
+        const posSlot = initProbs(256);
+        const posAlign = initProbs(16);
+        const lenChoice = initProbs(2);
+        const lenChoice2 = initProbs(2);
+        const lenLow = initProbs(128);
+        const lenMid = initProbs(128);
+        const lenHigh = initProbs(256);
+
+        // LZ77 with hash table
+        const WINDOW = Math.min(LZMA_DICT_SIZE, data.length);
+        const hashTable = new Map();
+        let rep0 = 1, rep1 = 1, rep2 = 1, rep3 = 1;
+
+        function getHash(pos) {
+          if (pos + 2 >= data.length) return -1;
+          return (data[pos] << 16) | (data[pos + 1] << 8) | data[pos + 2];
+        }
+
+        function findMatch(pos) {
+          const hash = getHash(pos);
+          if (hash === -1 || !hashTable.has(hash)) return { len: 0, dist: 0 };
+
+          let bestLen = 0, bestDist = 0;
+          const positions = hashTable.get(hash);
+
+          for (let i = positions.length - 1; i >= 0 && positions[i] >= pos - WINDOW; i--) {
+            const matchPos = positions[i];
+            const dist = pos - matchPos;
+            if (dist <= 0 || dist > WINDOW) continue;
+
+            let len = 0;
+            while (len < 273 && pos + len < data.length && data[matchPos + len] === data[pos + len]) {
+              len++;
+            }
+            if (len >= 2 && len > bestLen) {
+              bestLen = len;
+              bestDist = dist;
+            }
+          }
+          return { len: bestLen, dist: bestDist };
+        }
+
+        function encodeLiteral(byte, state, pos, prevByte) {
+          const litState = ((pos & ((1 << LZMA_LP) - 1)) << LZMA_LC) + (prevByte >> (8 - LZMA_LC));
+          const base = litState * 0x300;
+          let symbol = byte | 0x100;
+
+          do {
+            const bit = (symbol >> 7) & 1;
+            symbol <<= 1;
+            const probIdx = base + (symbol >> 8);
+            encoder.encode(literal[probIdx], bit);
+          } while (symbol < 0x10000);
+        }
+
+        function encodeLen(len, posState) {
+          if (len < 10) {
+            encoder.encode(lenChoice[0], 0);
+            const adjusted = len - 2;
+            for (let i = 2; i >= 0; i--) {
+              encoder.encode(lenLow[posState * 8 + (adjusted >> i)], (adjusted >> i) & 1);
+            }
+          } else if (len < 18) {
+            encoder.encode(lenChoice[0], 1);
+            encoder.encode(lenChoice2[0], 0);
+            const adjusted = len - 10;
+            for (let i = 2; i >= 0; i--) {
+              encoder.encode(lenMid[posState * 8 + (adjusted >> i)], (adjusted >> i) & 1);
+            }
+          } else {
+            encoder.encode(lenChoice[0], 1);
+            encoder.encode(lenChoice2[0], 1);
+            const adjusted = len - 18;
+            for (let i = 7; i >= 0; i--) {
+              encoder.encode(lenHigh[adjusted >> i], (adjusted >> i) & 1);
+            }
+          }
+        }
+
+        function getSlot(dist) {
+          if (dist < 4) return dist;
+          let slot = 2;
+          let d = dist;
+          while (d >= 4) { d >>= 1; slot += 2; }
+          return slot + ((dist >> (slot / 2 - 1)) & 1);
+        }
+
+        let state = 0;
+        let pos = 0;
+
+        while (pos < data.length) {
+          const posState = pos & ((1 << LZMA_PB) - 1);
+          const match = findMatch(pos);
+          const prevByte = pos > 0 ? data[pos - 1] : 0;
+
+          // Update hash
+          const hash = getHash(pos);
+          if (hash !== -1) {
+            if (!hashTable.has(hash)) hashTable.set(hash, []);
+            hashTable.get(hash).push(pos);
+          }
+
+          if (match.len >= 2) {
+            // Match
+            encoder.encode(isMatch[state * 16 + posState], 1);
+            encoder.encode(isRep[state], 0);
+
+            const dist = match.dist - 1;
+            const slot = getSlot(dist);
+
+            // Encode slot
+            for (let i = 5; i >= 0; i--) {
+              const slotBit = (slot >> i) & 1;
+              encoder.encode(posSlot[(state < 7 ? state : 7) * 64 + (slot >> (i + 1))], slotBit);
+            }
+
+            // Encode distance bits
+            if (slot >= 4) {
+              const footerBits = (slot >> 1) - 1;
+              const base = (2 | (slot & 1)) << footerBits;
+              const posReduced = dist - base;
+
+              if (slot < 14) {
+                encoder.encodeDirect(footerBits, posReduced);
+              } else {
+                encoder.encodeDirect(footerBits - 4, posReduced >> 4);
+                for (let i = 3; i >= 0; i--) {
+                  encoder.encode(posAlign[(posReduced >> i) & 0xF], (posReduced >> i) & 1);
+                }
+              }
+            }
+
+            encodeLen(match.len, posState);
+
+            rep3 = rep2; rep2 = rep1; rep1 = rep0;
+            rep0 = match.dist;
+            state = state < 7 ? 7 : 10;
+
+            // Update hash for match
+            for (let i = 1; i < match.len; i++) {
+              const h = getHash(pos + i);
+              if (h !== -1) {
+                if (!hashTable.has(h)) hashTable.set(h, []);
+                hashTable.get(h).push(pos + i);
+              }
+            }
+            pos += match.len;
+          } else {
+            // Literal
+            encoder.encode(isMatch[state * 16 + posState], 0);
+            encodeLiteral(data[pos], state, pos, prevByte);
+            state = state < 4 ? 0 : state - 3;
+            pos++;
+          }
+        }
+
+        return encoder.finish();
+      }
+
+      function createLzmaStream(data) {
+        const compressed = compress(data);
+
+        // LZMA header: 5 bytes props + 8 bytes size
+        const header = new Uint8Array(13);
+        // Properties byte: (pb * 5 + lp) * 9 + lc
+        header[0] = (LZMA_PB * 5 + LZMA_LP) * 9 + LZMA_LC;
+        // Dictionary size (little-endian)
+        const dictSize = LZMA_DICT_SIZE;
+        header[1] = dictSize & 0xFF;
+        header[2] = (dictSize >> 8) & 0xFF;
+        header[3] = (dictSize >> 16) & 0xFF;
+        header[4] = (dictSize >> 24) & 0xFF;
+        // Uncompressed size (little-endian, 8 bytes)
+        const size = BigInt(data.length);
+        for (let i = 0; i < 8; i++) {
+          header[5 + i] = Number((size >> BigInt(i * 8)) & 0xFFn);
+        }
+
+        const result = new Uint8Array(header.length + compressed.length);
+        result.set(header, 0);
+        result.set(compressed, header.length);
+        return result;
+      }
+
+      return { compress: createLzmaStream };
+    })();
+
+    // ============================================
     // Gzip Wrapper
     // ============================================
 
@@ -699,19 +975,20 @@
         offset += data.length;
       }
 
-      progressText.textContent = 'Compressing (solid)...';
+      const platform = platformSelect.value;
+
+      progressText.textContent = platform === 'linux' ? 'Compressing (LZMA)...' : 'Compressing (solid)...';
       progressFill.style.width = '50%';
       await new Promise(r => setTimeout(r, 0));
 
-      // Compress the entire archive as one unit (solid compression)
-      const compressed = gzipCompress(archive);
+      // Compress - use LZMA for Linux, gzip for others
+      const compressed = platform === 'linux' ? LZMA.compress(archive) : gzipCompress(archive);
       const base64 = arrayBufferToBase64(compressed);
 
       progressFill.style.width = '100%';
       progressText.textContent = 'Generating script...';
 
       // Generate script based on platform
-      const platform = platformSelect.value;
       let script;
       if (platform === 'windows') {
         script = generatePowerShellScript(base64, fileList.length);
@@ -837,7 +1114,7 @@ open "\$EXTRACT_DIR"
 
       let script = `#!/bin/bash
 # Self-extracting archive generated on ${new Date().toISOString()}
-# Contains ${fileCount} file(s) - Solid compression
+# Contains ${fileCount} file(s) - LZMA solid compression
 # Run: chmod +x archive.sh && ./archive.sh
 set -e
 
@@ -845,16 +1122,16 @@ SCRIPT_DIR="$(cd "$(dirname "\$0")" && pwd)"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 EXTRACT_DIR="\$SCRIPT_DIR/extracted_\$TIMESTAMP"
 
-echo "Self-Extracting Archive"
-echo "======================"
+echo "Self-Extracting Archive (LZMA)"
+echo "=============================="
 echo "Extracting ${fileCount} file(s) to: \$EXTRACT_DIR"
 echo ""
 
 mkdir -p "\$EXTRACT_DIR"
 
-# Decode and decompress the solid archive
+# Decode and decompress the solid archive (LZMA)
 ARCHIVE_FILE=$(mktemp)
-base64 -d << '${heredocMarker}' | gunzip > "\$ARCHIVE_FILE"
+base64 -d << '${heredocMarker}' | lzma -d > "\$ARCHIVE_FILE"
 ${chunks.join('\n')}
 ${heredocMarker}
 
