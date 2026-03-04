@@ -17,11 +17,33 @@
       color: #eee;
       min-height: 100vh;
       padding: 20px;
+      position: relative;
+    }
+
+    body::before {
+      content: '';
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: url('compression-logo.jpg') center center no-repeat;
+      background-size: 60%;
+      opacity: 0.06;
+      pointer-events: none;
+      z-index: 0;
     }
 
     .container {
-      max-width: 800px;
-      margin: 0 auto;
+      position: relative;
+      z-index: 1;
+    }
+
+    .logo {
+      display: block;
+      max-width: 280px;
+      margin: 0 auto 20px;
+      border-radius: 12px;
     }
 
     h1 {
@@ -184,6 +206,7 @@
 </head>
 <body>
   <div class="container">
+    <img src="compression-logo.jpg" alt="Compression Tool" class="logo">
     <h1>Self-Extracting Archive Creator</h1>
 
     <div class="drop-zone" id="dropZone">
