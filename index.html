@@ -39,13 +39,6 @@
       z-index: 1;
     }
 
-    .logo {
-      display: block;
-      max-width: 280px;
-      margin: 0 auto 20px;
-      border-radius: 12px;
-    }
-
     h1 {
       text-align: center;
       margin-bottom: 20px;
@@ -206,7 +199,6 @@
 </head>
 <body>
   <div class="container">
-    <img src="compression-logo.jpg" alt="Compression Tool" class="logo">
     <h1>Self-Extracting Archive Creator</h1>
 
     <div class="drop-zone" id="dropZone">
@@ -229,6 +221,7 @@
       <button class="btn-secondary" id="clearBtn" disabled>Clear</button>
       <select id="platformSelect">
         <option value="mac">macOS (.command)</option>
+        <option value="linux">Linux (.sh + xz)</option>
         <option value="windows">Windows (.ps1)</option>
         <option value="zip">ZIP file (universal)</option>
       </select>
@@ -719,9 +712,14 @@
 
       // Generate script based on platform
       const platform = platformSelect.value;
-      const script = platform === 'windows'
-        ? generatePowerShellScript(base64, fileList.length)
-        : generateBashScript(base64, fileList.length);
+      let script;
+      if (platform === 'windows') {
+        script = generatePowerShellScript(base64, fileList.length);
+      } else if (platform === 'linux') {
+        script = generateLinuxScript(base64, fileList.length);
+      } else {
+        script = generateBashScript(base64, fileList.length);
+      }
       return { script, originalSize: totalOriginalSize, compressedSize: compressed.length, platform };
     }
 
@@ -828,10 +826,100 @@ open "\$EXTRACT_DIR"
       return script;
     }
 
+    function generateLinuxScript(base64Data, fileCount) {
+      const heredocMarker = 'ARCHIVE_DATA_' + Date.now();
+
+      // Split base64 into chunks for readability
+      const chunks = [];
+      for (let i = 0; i < base64Data.length; i += 76) {
+        chunks.push(base64Data.substring(i, i + 76));
+      }
+
+      let script = `#!/bin/bash
+# Self-extracting archive generated on ${new Date().toISOString()}
+# Contains ${fileCount} file(s) - Solid compression
+# Run: chmod +x archive.sh && ./archive.sh
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "\$0")" && pwd)"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+EXTRACT_DIR="\$SCRIPT_DIR/extracted_\$TIMESTAMP"
+
+echo "Self-Extracting Archive"
+echo "======================"
+echo "Extracting ${fileCount} file(s) to: \$EXTRACT_DIR"
+echo ""
+
+mkdir -p "\$EXTRACT_DIR"
+
+# Decode and decompress the solid archive
+ARCHIVE_FILE=$(mktemp)
+base64 -d << '${heredocMarker}' | gunzip > "\$ARCHIVE_FILE"
+${chunks.join('\n')}
+${heredocMarker}
+
+# Read 4-byte little-endian integer from archive
+read_uint32() {
+  local b0 b1 b2 b3
+  b0=$(od -An -tu1 -N1 -j"\$1" "\$ARCHIVE_FILE" | tr -d ' ')
+  b1=$(od -An -tu1 -N1 -j"\$((\$1+1))" "\$ARCHIVE_FILE" | tr -d ' ')
+  b2=$(od -An -tu1 -N1 -j"\$((\$1+2))" "\$ARCHIVE_FILE" | tr -d ' ')
+  b3=$(od -An -tu1 -N1 -j"\$((\$1+3))" "\$ARCHIVE_FILE" | tr -d ' ')
+  echo "\$(( b0 + (b1 << 8) + (b2 << 16) + (b3 << 24) ))"
+}
+
+# Parse and extract files from solid archive
+OFFSET=0
+FILE_COUNT=$(read_uint32 \$OFFSET)
+OFFSET=4
+
+for ((i=0; i<FILE_COUNT; i++)); do
+  # Read path length and path
+  PATH_LEN=$(read_uint32 \$OFFSET)
+  OFFSET=\$((OFFSET + 4))
+  FILE_PATH=$(dd if="\$ARCHIVE_FILE" bs=1 skip=\$OFFSET count=\$PATH_LEN 2>/dev/null)
+  OFFSET=\$((OFFSET + PATH_LEN))
+
+  # Read data length
+  DATA_LEN=$(read_uint32 \$OFFSET)
+  OFFSET=\$((OFFSET + 4))
+
+  # Create directory if needed
+  DIR_PATH=$(dirname "\$FILE_PATH")
+  if [ "\$DIR_PATH" != "." ]; then
+    mkdir -p "\$EXTRACT_DIR/\$DIR_PATH"
+  fi
+
+  # Extract file data
+  dd if="\$ARCHIVE_FILE" bs=1 skip=\$OFFSET count=\$DATA_LEN of="\$EXTRACT_DIR/\$FILE_PATH" 2>/dev/null
+  OFFSET=\$((OFFSET + DATA_LEN))
+
+  echo "  Extracted: \$FILE_PATH"
+done
+
+# Cleanup
+rm -f "\$ARCHIVE_FILE"
+
+echo ""
+echo "Extraction complete!"
+echo "Files extracted to: \$EXTRACT_DIR"
+echo ""
+
+# Try to open file manager (works on most Linux desktops)
+if command -v xdg-open &> /dev/null; then
+  xdg-open "\$EXTRACT_DIR"
+elif command -v nautilus &> /dev/null; then
+  nautilus "\$EXTRACT_DIR"
+fi
+`;
+
+      return script;
+    }
+
     function downloadScript(script, platform) {
-      const isWindows = platform === 'windows';
-      const mimeType = isWindows ? 'application/x-powershell' : 'application/x-sh';
-      const extension = isWindows ? 'ps1' : 'command';
+      const mimeType = platform === 'windows' ? 'application/x-powershell' : 'application/x-sh';
+      const extensions = { windows: 'ps1', linux: 'sh', mac: 'command' };
+      const extension = extensions[platform] || 'sh';
 
       const blob = new Blob([script], { type: mimeType });
       const url = URL.createObjectURL(blob);
